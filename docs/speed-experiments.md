@@ -40,7 +40,50 @@ Goal: prefill speed closer to q8_0 (currently 1074 vs 2694 tok/s) while PPL stay
 
 ---
 
-## Experiment 2: Reduced centroid lookup overhead
+## Experiment 2: Pre-packed half4 sign arrays
+
+**Changes:** Pre-computed `turbo_wht_signs1_h4[32]` and `turbo_wht_signs2_h4[32]` as constant half4 arrays, eliminating per-element float→half conversion in the dequant.
+
+**Results:** 1411 → 1424 tok/s (+1%). Marginal — Metal compiler already optimized constant reads.
+
+**Status:** COMPLETE — committed (minor win)
+
+---
+
+## Experiment 3: RoPE-aware pre-rotate-queries (THE BIG WIN)
+
+**Hypothesis:** Earlier pre-rotate-queries failed (PPL 23.5) because it was placed in build_attn_mha (after permute). The fix: apply WHT in build_attn, after RoPE is already applied to Q, before build_attn_mha. This matches the K pipeline: K gets WHT during quantize (SET_ROWS), which happens after RoPE.
+
+**Changes:**
+- Q rotation: `ggml_mul_mat(R, q)` in build_attn, after cpy_k/cpy_v, before build_attn_mha
+- V un-rotation: `ggml_mul_mat(R^T, cur)` after build_attn_mha, before wo projection
+- Stripped WHT from turbo3_dequantize_full_block (returns centroid * norm, no rotation)
+
+**Results:**
+
+| Config | Prefill tok/s | PPL (32-chunk) | PPL (8-chunk) | vs q8_0 |
+|--------|-------------|----------------|---------------|---------|
+| turbo3 dequant WHT (Exp1+2) | 1424 | 5.47 | 6.195 | 0.53x |
+| **turbo3 graph WHT** | **2095** | **5.46** | **6.201** | **0.78x** |
+| q8_0 baseline | 2694 | 5.41 | — | 1.00x |
+
+**+47% speedup over Exp1+2. 4.9x compression at 78% of q8_0 speed.**
+
+PPL 6.201 — within 0.01 of 6.195 baseline. Quality target MET.
+
+**Codex review findings:**
+1. Q rotation gate `q->ne[0] % 128 == 0` would skip non-256 head dims — add assert
+2. V un-rotation keyed off k->type not v->type — acceptable for turbo3 (always both)
+3. Only covers the `llm_graph_input_attn_kv` build_attn overload — other paths need same treatment
+
+**Why it works now (vs PPL 23.5 earlier):**
+The earlier attempt applied WHT in build_attn_mha AFTER the ggml_permute. But the permute doesn't change values, so the pipeline point is equivalent. The real fix was the ggml column-major storage correction (swapping TURBO_ROTATION_R and TURBO_ROTATION_RT). The Gemini RoPE/WHT commutativity explanation was wrong — the issue was purely the matrix orientation in ggml.
+
+**Status:** COMPLETE — committed
+
+---
+
+## Experiment 4 (was 2): Reduced centroid lookup overhead
 
 **Hypothesis:** The 3-bit index unpacking does 3 loads + 2 shifts + 1 OR per element. Pre-combining indices during quantize into a single packed array would reduce dequant to 1 load + mask.
 
