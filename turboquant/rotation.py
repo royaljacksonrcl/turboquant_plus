@@ -12,12 +12,14 @@ def random_rotation_dense(d: int, rng: np.random.Generator) -> np.ndarray:
     """Generate a Haar-distributed random rotation matrix via QR decomposition.
 
     Args:
-        d: Dimension of the rotation matrix.
+        d: Dimension of the rotation matrix. Must be >= 1.
         rng: NumPy random generator for reproducibility.
 
     Returns:
         Orthogonal matrix Π ∈ R^(d×d) with det(Π) = +1.
     """
+    if d < 1:
+        raise ValueError(f"d must be >= 1, got {d}")
     # Random Gaussian matrix
     G = rng.standard_normal((d, d))
     # QR decomposition gives orthogonal Q
@@ -47,6 +49,8 @@ def hadamard_matrix(n: int) -> np.ndarray:
 
     Uses the recursive Sylvester construction.
     """
+    if n < 1 or (n & (n - 1)) != 0:
+        raise ValueError(f"n must be a positive power of 2, got {n}")
     if n == 1:
         return np.array([[1.0]])
     half = hadamard_matrix(n // 2)
@@ -88,6 +92,8 @@ def fast_walsh_hadamard_transform(x: np.ndarray) -> np.ndarray:
         New transformed array (normalized by 1/sqrt(n)).
     """
     n = len(x)
+    if n < 1 or (n & (n - 1)) != 0:
+        raise ValueError(f"Input length must be a positive power of 2, got {n}")
     x = x.copy().astype(np.float64)
     h = 1
     while h < n:

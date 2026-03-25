@@ -153,6 +153,15 @@ class TestDenseRotation:
             assert Pi.shape == (d, d)
             np.testing.assert_allclose(Pi @ Pi.T, np.eye(d), atol=1e-10)
 
+    def test_invalid_dimension_raises(self):
+        """d < 1 should raise ValueError."""
+        from turboquant.rotation import random_rotation_dense
+
+        with pytest.raises(ValueError, match="d must be >= 1"):
+            random_rotation_dense(0, np.random.default_rng(42))
+        with pytest.raises(ValueError, match="d must be >= 1"):
+            random_rotation_dense(-5, np.random.default_rng(42))
+
     def test_shape(self):
         """Output should be (d, d)."""
         from turboquant.rotation import random_rotation_dense
@@ -165,6 +174,24 @@ class TestDenseRotation:
 
 class TestFastWalshHadamard:
     """Tests for the fast Walsh-Hadamard transform."""
+
+    def test_hadamard_non_pow2_raises(self):
+        """Non-power-of-2 should raise ValueError."""
+        from turboquant.rotation import hadamard_matrix
+
+        with pytest.raises(ValueError, match="positive power of 2"):
+            hadamard_matrix(3)
+        with pytest.raises(ValueError, match="positive power of 2"):
+            hadamard_matrix(0)
+        with pytest.raises(ValueError, match="positive power of 2"):
+            hadamard_matrix(-1)
+
+    def test_fwht_non_pow2_raises(self):
+        """Non-power-of-2 input should raise ValueError."""
+        from turboquant.rotation import fast_walsh_hadamard_transform
+
+        with pytest.raises(ValueError, match="positive power of 2"):
+            fast_walsh_hadamard_transform(np.array([1.0, 2.0, 3.0]))
 
     def test_hadamard_matrix_matches_scipy(self):
         """Our hadamard_matrix should match scipy's."""
