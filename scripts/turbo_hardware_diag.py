@@ -2084,6 +2084,19 @@ def package_results(
     # Close log so it's fully flushed before zipping
     log_path = log.path
 
+    # Scrub PII: replace home directory with ~ in all output files
+    home_dir = str(Path.home())
+    for scrub_path in [log_path, profile_path, monitor.csv_path]:
+        if os.path.isfile(scrub_path):
+            try:
+                with open(scrub_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                content = content.replace(home_dir, "~")
+                with open(scrub_path, "w", encoding="utf-8") as f:
+                    f.write(content)
+            except Exception:
+                pass  # best-effort scrub
+
     # Create zip
     try:
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
