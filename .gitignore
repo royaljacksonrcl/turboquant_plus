@@ -19,3 +19,6 @@ coverage.xml
 .ipynb_checkpoints/
 niah_reference_v1/
 niah_results*/
+scripts/.turbo-diag-venv/
+niah_decay_test/
+niah_v2_results/
