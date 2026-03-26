@@ -41,7 +41,17 @@ Compresses transformer KV cache **4.6x** using PolarQuant + Walsh-Hadamard rotat
 | 16K | 1737 | 1757 | 0.989x |
 | 32K | 1211 | 1217 | 0.995x |
 
-**Flat 99% of q8_0 speed regardless of context length.** See [Context Scaling Deep Dive](docs/context-scaling-deep-dive.md) for the full investigation.
+**Prefill: flat 99% of q8_0 speed regardless of context length.**
+
+### Decode Speed (Server, Real-World)
+
+| Context | turbo3 decode | q8_0 decode | turbo3/q8_0 |
+|---------|-------------|-----------|-------------|
+| Short (~12 tok) | 77.2 | 85.2 | 0.91x |
+| 8K | 67.3 | 77.7 | 0.87x |
+| 48K (70-page PDF) | 39.0 | 55.6 | 0.70x |
+
+Decode is 87-91% of q8_0 at typical context. At very long context (48K+) it's 70% due to per-position dequant cost. See [Context Scaling Deep Dive](docs/context-scaling-deep-dive.md) and [Decode Speed Investigation](docs/experiment-decode-speed.md).
 
 ### Speed Optimization Journey
 
