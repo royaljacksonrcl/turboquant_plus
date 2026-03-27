@@ -8,12 +8,19 @@ Compresses transformer KV cache **4.6x** using PolarQuant + Walsh-Hadamard rotat
 
 **Working end-to-end on Apple Silicon** — Qwen 3.5 35B-A3B MoE with 3-bit TurboQuant KV cache on M5 Max via llama.cpp Metal. **Faster than q8_0 at 4.6x compression.**
 
-## Status: v1 Complete, Speed Optimized
+## Status: v1 Complete, Speed Optimized, Community-Tested
 
-- 141 Python tests, 100% code coverage
+- 511+ Python tests, 100% code coverage on diagnostics
 - C port integrated into llama.cpp with Metal GPU kernels
 - `--cache-type-k turbo3 --cache-type-v turbo3` works on Apple Silicon
 - **q8_0 speed parity achieved** (2747 vs 2694 tok/s prefill)
+- **Norm correction**: PPL beats q8_0 on CUDA (-1.17%), +1.1% on Metal (ported from @spiritbuun)
+- **4-mag LUT**: auto-detected on M1/M2/M3/M4, +38-45% decode at long context
+- **Layer-adaptive mode 2**: q8_0 quality at 3.5x compression (last 8 layers at q8_0)
+- **Temporal decay**: 30-34% memory savings at long context (experiment branch)
+- **NIAH retrieval**: 9/9 (100%) single needle with sparse V, beating q8_0 (7/9). 100% multi-key through 32K
+- **14 decode approaches tested** on M2 Pro — comprehensive hardware analysis
+- Community: 10+ testers across M1/M2/M5 Mac, RTX 3090/4090/5090, AMD 6800 XT/9070
 - Rotation Gaussianization validated on real Qwen3 KV tensors (kurtosis 900 → 2.9)
 
 ---
@@ -27,7 +34,7 @@ Compresses transformer KV cache **4.6x** using PolarQuant + Walsh-Hadamard rotat
 | f16 | 1.0x | — | 6.121 | — |
 | q8_0 | 2.0x | 2694 | 5.414 | baseline |
 | q4_0 | 4.0x | — | 6.142 | — |
-| **turbo3** | **4.6x** | **2747** | **5.460** | **1.02x** |
+| **turbo3** | **4.6x** | **2747** | **5.445** | **1.02x** |
 
 **4.6x compression. q8_0 speed parity at all context depths. 1% quality loss.** The trifecta.
 
@@ -43,15 +50,22 @@ Compresses transformer KV cache **4.6x** using PolarQuant + Walsh-Hadamard rotat
 
 **Prefill: flat 99% of q8_0 speed regardless of context length.**
 
-### Decode Speed (Server, Real-World)
+### Decode Speed (M5 Max 128GB, Sparse V Dequant)
 
 | Context | turbo3 decode | q8_0 decode | turbo3/q8_0 |
 |---------|-------------|-----------|-------------|
-| Short (~12 tok) | 78.4 | 85.2 | 0.92x |
-| 8K | 68.3 | 77.7 | 0.88x |
-| 48K (70-page PDF) | 39.9 | 55.6 | 0.72x |
+| Short (~12 tok) | 77.6 | 86.3 | 0.90x |
+| 4K | 74.9 | — | — |
+| 8K | 71.7 | — | — |
+| 16K | 66.5 | 72.0 | 0.92x |
+| 24K (70-page PDF) | 53.3 | 68.2 | 0.78x |
+| 32K | 57.7 | 62.0 | **0.93x** |
 
-Decode is 88-92% of q8_0 at typical context. At very long context (48K+) it's 72% due to per-position dequant cost. See [Context Scaling Deep Dive](docs/context-scaling-deep-dive.md) and [Decode Speed Investigation](docs/experiment-decode-speed.md).
+**Sparse V dequant** skips V dequantization for positions where softmax attention weight < 1e-6. At long context, 90%+ of attention weights are negligible — this saves ~half the total dequant cost. **+22.8% decode at 32K** vs previous turbo3, pushing the ratio from 0.76x to 0.93x. Zero quality loss (PPL 6.176 vs 6.211 without sparse V). Benefit scales with context length — the longer the context, the bigger the win. This is a 3-line kernel change.
+
+Sparse V is not TurboQuant-specific: on q8_0 KV cache it yields a +5% decode speedup with identical PPL and NIAH, confirming this is a general attention-aware optimization rather than a compression-specific trick. See the [full paper](docs/papers/sparse-v-dequant.md).
+
+On M2/M1 (pre-M5), the auto-detected 4-mag LUT gives an additional +38-45% decode improvement at long context, and is additive with sparse V. See [Decode Speed Hardware Analysis](docs/decode-speed-hardware-analysis.md) for the full 14-approach experiment log, and [Context Scaling Deep Dive](docs/context-scaling-deep-dive.md) for the M5 Max optimization journey.
 
 ### Speed Optimization Journey
 
@@ -75,6 +89,36 @@ Decode is 88-92% of q8_0 at typical context. At very long context (48K+) it's 72
 | TurboQuant 3-bit | 4.9× | 0.91 | 0.0018 |
 | TurboQuant 3.5-bit (outlier) | **3.8×** | 0.95 | 0.0009 |
 | TurboQuant 4-bit | 3.8× | 0.96 | 0.0007 |
+
+### Needle-In-A-Haystack (NIAH) Retrieval
+
+Tested using [Kamradt](https://github.com/gkamradt/LLMTest_NeedleInAHaystack) and [NVIDIA RULER](https://github.com/NVIDIA/RULER) methodology. Qwen3.5-35B-A3B on M5 Max 128GB.
+
+**Single Needle Retrieval (with sparse V dequant):**
+
+| Test | q8_0 | turbo3 | turbo3 + sparse V |
+|------|------|--------|-------------------|
+| Single needle (9 positions) | 7/9 | 7/9 | **9/9 (100%)** |
+
+**turbo3 + sparse V achieves perfect retrieval, beating q8_0.** Needle positions always have meaningful attention weights (well above the 1e-6 threshold) and are never skipped. The improvement likely stems from reduced numerical noise — accumulating fewer negligible V contributions produces a cleaner output signal.
+
+**Single Needle — Depth (0-100%) x Context Length (pre-sparse-V):**
+
+| Depth | 4K | 8K | 16K | 32K |
+|-------|----|----|-----|-----|
+| q8_0 | 5/5 | 4/5 | 4/5 | 4/5 |
+| turbo3 | 5/5 | 4/5 | 5/5 | 3/5 |
+
+**Pre-sparse-V aggregate: q8_0 85% (17/20), turbo3 80% (16/20).** No systematic degradation from compression. N=10 needles remarkably stable (9-10/10 at every depth).
+
+**Multi-Key with 3 Distractors (RULER MK-NIAH):**
+
+| Cache Type | 4K | 8K | 16K | 32K |
+|------------|----|----|-----|-----|
+| q8_0 | 1/1 | 1/1 | 1/1 | 1/1 |
+| turbo3 | 1/1 | 1/1 | 1/1 | 1/1 |
+
+**100% retrieval accuracy with distractors through 32K.** turbo3 correctly ignores distractor needles at all context depths.
 
 ### Key Validation
 
