@@ -8,9 +8,9 @@ GitHub: [@TheTom](https://github.com/TheTom)
 
 ## Abstract
 
-Quantized KV cache compression (e.g., TurboQuant, NVFP4) reduces memory consumption during LLM inference but introduces a dequantization bottleneck during autoregressive decoding. After exhaustively testing 14 alternative dequant implementations — register arrays, bit-arithmetic, SIMD shuffles, fused block operations — we found that no instruction-level optimization beats the hardware's constant memory LUT on Apple Silicon. The bottleneck is not *how* values are dequantized, but *how many*.
+Quantized KV cache compression (e.g., TurboQuant, NVFP4) reduces memory consumption during LLM inference but introduces a dequantization bottleneck during autoregressive decoding. After exhaustively testing 14 alternative dequant implementations (register arrays, bit-arithmetic, SIMD shuffles, fused block operations), we found that no instruction-level optimization beats the hardware's constant memory LUT on Apple Silicon. The bottleneck is not *how* values are dequantized, but *how many*.
 
-We observe that in flash attention kernels, softmax attention weights are computed *before* value accumulation, and that at long context lengths, 90%+ of these weights are negligible. We propose **sparse V dequantization**: skipping value dequantization for positions where the attention weight falls below a threshold. Rather than making N dequant operations faster, we eliminate $(1-p) \times N$ of them entirely. On Apple M5 Max with a 35B MoE model, this yields **+22.8% decode throughput at 32K context** with zero perplexity loss — and unexpectedly *improved* needle-in-a-haystack retrieval (9/9 vs 7/9 baseline), suggesting that dequantizing negligible positions introduces noise rather than useful signal. The technique requires 3 lines of code, is orthogonal to existing dequant optimizations, general to any quantized KV cache scheme, and its benefit scales with context length.
+We observe that in flash attention kernels, softmax attention weights are computed *before* value accumulation, and that at long context lengths, 90%+ of these weights are negligible. We propose **sparse V dequantization**: skipping value dequantization for positions where the attention weight falls below a threshold. Rather than making N dequant operations faster, we eliminate $(1-p) \times N$ of them entirely. On Apple M5 Max with a 35B MoE model, this yields **+22.8% decode throughput at 32K context** with zero perplexity loss, and unexpectedly *improved* needle-in-a-haystack retrieval (9/9 vs 7/9 baseline), suggesting that dequantizing negligible positions introduces noise rather than useful signal. The technique requires 3 lines of code, is orthogonal to existing dequant optimizations, general to any quantized KV cache scheme, and its benefit scales with context length.
 
 ---
 
@@ -18,7 +18,7 @@ We observe that in flash attention kernels, softmax attention weights are comput
 
 KV cache compression is becoming essential for long-context LLM inference. Google's TurboQuant (ICLR 2026) achieves 4.6× compression via Walsh-Hadamard rotation and polar quantization, with perplexity within 1.1% of uncompressed baselines. However, the compression introduces a per-token dequantization cost during autoregressive decoding that grows with context length.
 
-On Apple Silicon, TurboQuant's dequant uses a centroid lookup table (LUT) in Metal constant memory. Profiling reveals this LUT accounts for 14–34% of decode time depending on hardware generation and context depth. At 32K context on M5 Max, the dequant overhead alone reduces decode throughput from 78.3 tok/s (no-dequant ceiling) to 47.0 tok/s — a 40% penalty. Notably, the no-dequant ceiling is **28% faster than uncompressed q8_0** (61.0 tok/s) because the compressed cache moves less data over the memory bus.
+On Apple Silicon, TurboQuant's dequant uses a centroid lookup table (LUT) in Metal constant memory. Profiling reveals this LUT accounts for 14–34% of decode time depending on hardware generation and context depth. At 32K context on M5 Max, the dequant overhead alone reduces decode throughput from 78.3 tok/s (no-dequant ceiling) to 47.0 tok/s, a 40% penalty. Notably, the no-dequant ceiling is **28% faster than uncompressed q8_0** (61.0 tok/s) because the compressed cache moves less data over the memory bus.
 
 This gap motivated an exhaustive search: 14 alternative dequant implementations were tested on M2 Pro and M5 Max hardware, including register arrays, bit-arithmetic, FMA branchless computation, simd_shuffle cross-lane transfer, and fused block dot products. None beat the baseline constant memory LUT on Apple Silicon (see Section 5).
 
@@ -53,7 +53,7 @@ The attention weights $\alpha_i = \text{softmax}(QK^T)_i$ are known before V deq
 
 ### 2.3 Attention Sparsity at Long Context
 
-At context length $n$, the softmax distribution concentrates on a small subset of positions. Empirically, at 32K context with Qwen3.5-35B-A3B, over 90% of attention weights fall below $10^{-6}$. This sparsity increases with context length — the longer the conversation, the more positions have negligible attention.
+At context length $n$, the softmax distribution concentrates on a small subset of positions. Empirically, at 32K context with Qwen3.5-35B-A3B, over 90% of attention weights fall below $10^{-6}$. This sparsity increases with context length: the longer the conversation, the more positions have negligible attention.
 
 ---
 
@@ -79,7 +79,7 @@ When the attention weight for a KV position is below the threshold ($10^{-6}$), 
 
 ### 3.2 Threshold Selection
 
-The threshold $\tau = 10^{-6}$ was chosen conservatively. For a 32K context with 32 attention heads, a weight of $10^{-6}$ contributes at most $10^{-6} \times \|V\|$ to the output — negligible relative to the dominant attention positions. We validate empirically that perplexity is identical at this threshold (Section 4).
+The threshold $\tau = 10^{-6}$ was chosen conservatively. For a 32K context with 32 attention heads, a weight of $10^{-6}$ contributes at most $10^{-6} \times \|V\|$ to the output, negligible relative to the dominant attention positions. We validate empirically that perplexity is identical at this threshold (Section 4).
 
 ### 3.3 Interaction with K Dequant Optimizations
 
@@ -115,7 +115,7 @@ Full regression suite with sparse V enabled ($\tau = 10^{-6}$):
 | 16K | 58.9 | 66.5 | +12.9% | 0.923× |
 | 32K | 47.0 | 57.7 | **+22.8%** | **0.931×** |
 
-The benefit scales with context length because longer contexts have more positions with negligible attention weights. At 32K, the ratio vs uncompressed q8\_0 improves from 0.76× to 0.93× — near parity.
+The benefit scales with context length because longer contexts have more positions with negligible attention weights. At 32K, the ratio vs uncompressed q8\_0 improves from 0.76× to 0.93×, near parity.
 
 ### 4.3 Quality Validation
 
@@ -134,7 +134,7 @@ Sparse V perplexity (6.176) is actually *lower* (better) than baseline turbo3 (6
 | Single needle (9 positions) | 7/9 | 7/9 | **9/9 (100%)** |
 | Multi-key (4K-32K) | 4/4 | 4/4 | 4/4 |
 
-Sparse V achieves **perfect** single-needle retrieval (9/9), improving from 7/9 without sparse V. This is counterintuitive but explainable: needle positions always have meaningful attention weights (well above $10^{-6}$) and are never skipped. The improvement suggests that dequantizing low-weight positions is not merely slow — it actively pollutes the attention accumulation with quantization artifacts. Each negligible-weight position contributes near-zero useful signal but non-zero quantization noise to the output. By skipping these positions, sparse V produces a cleaner accumulated value, improving retrieval fidelity. This is a second, independent contribution: sparse V is not just a speed optimization, it is also a quality optimization for quantized KV caches.
+Sparse V achieves **perfect** single-needle retrieval (9/9), improving from 7/9 without sparse V. This is counterintuitive but explainable: needle positions always have meaningful attention weights (well above $10^{-6}$) and are never skipped. The improvement suggests that dequantizing low-weight positions is not merely slow; it actively pollutes the attention accumulation with quantization artifacts. Each negligible-weight position contributes near-zero useful signal but non-zero quantization noise to the output. By skipping these positions, sparse V produces a cleaner accumulated value, improving retrieval fidelity. This is a second, independent contribution: sparse V is not just a speed optimization, it is also a quality optimization for quantized KV caches.
 
 ### 4.5 Prefill Impact
 
@@ -149,9 +149,9 @@ The decode numbers in Section 4.2 are from `llama-bench` batch evaluation, which
 | Prefill | 1417.8 tok/s | 1449.9 tok/s | 0.98× |
 | Decode | 53.3 tok/s | 68.2 tok/s | 0.78× |
 
-The server-mode decode ratio (0.78×) is notably worse than the batch benchmark at comparable context depth (0.92× at 16K, 0.93× at 32K). The gap is attributable to server overhead — HTTP request handling, chat template processing, sampling, and single-request scheduling — which reduces GPU utilization and makes the per-token dequant cost proportionally larger. Prefill remains near parity (0.98×) because the prompt is processed in one large batch regardless of server overhead.
+The server-mode decode ratio (0.78×) is notably worse than the batch benchmark at comparable context depth (0.92× at 16K, 0.93× at 32K). The gap is attributable to server overhead (HTTP request handling, chat template processing, sampling, and single-request scheduling) which reduces GPU utilization and makes the per-token dequant cost proportionally larger. Prefill remains near parity (0.98×) because the prompt is processed in one large batch regardless of server overhead.
 
-**Takeaway:** Users should expect ~78% of q8\_0 decode speed at long context in real server deployments, not the ~93% measured in synthetic benchmarks. The sparse V improvement still holds — without it, this number would be closer to 60%.
+**Takeaway:** Users should expect ~78% of q8\_0 decode speed at long context in real server deployments, not the ~93% measured in synthetic benchmarks. The sparse V improvement still holds; without it, this number would be closer to 60%.
 
 ### 4.7 Threshold Ablation
 
@@ -165,9 +165,9 @@ We swept the threshold $\tau$ across five values to determine sensitivity:
 | $10^{-7}$ | 6.1756 | +1.06% | 75.7 | 1113.8 |
 | $10^{-8}$ | 6.1756 | +1.06% | 76.4 | 1114.4 |
 
-**Perplexity is identical across all five thresholds.** Even $\tau = 10^{-4}$ (the most aggressive) produces the same PPL as $\tau = 10^{-8}$ (essentially disabled). This confirms the hypothesis from Section 2.3: positions below $10^{-4}$ contribute nothing measurable to output quality.
+**Perplexity is identical across all five thresholds.** Even $\tau = 10^{-4}$ (the most aggressive) produces the same PPL as $\tau = 10^{-8}$ (essentially disabled). This confirms that positions below $10^{-4}$ contribute no measurable signal while still incurring dequantization cost. They are pure noise in the accumulation.
 
-**Short-context decode speed is flat** ($\pm 1$ tok/s, within measurement noise). At short context, attention is dense — few positions have weights below any of these thresholds, so the skip condition rarely triggers. The threshold's impact is context-dependent: the +22.8% improvement at 32K (Section 4.2) comes from the exponentially increasing fraction of near-zero weights at long context.
+**Short-context decode speed is flat** ($\pm 1$ tok/s, within measurement noise). At short context, attention is dense, so few positions have weights below any of these thresholds, so the skip condition rarely triggers. The threshold's impact is context-dependent: the +22.8% improvement at 32K (Section 4.2) comes from the exponentially increasing fraction of near-zero weights at long context.
 
 **Conclusion:** $\tau = 10^{-6}$ remains the recommended default. More aggressive values ($10^{-4}$, $10^{-5}$) are equally safe quality-wise but offer no additional speed benefit at short context. The long-context gains are already captured at $10^{-6}$. Future work could validate $\tau = 10^{-4}$ on harder retrieval tasks (multi-needle NIAH at 128K+) to confirm no degradation before raising the default. Raw benchmark logs are available in [`threshold-ablation-logs/`](../threshold-ablation-logs/) and the full analysis in [`threshold-ablation.md`](../threshold-ablation.md).
 
@@ -184,7 +184,7 @@ Before discovering sparse V, we exhaustively tested 14 dequant-level optimizatio
 | 3 | Inline block dequant | 13.5 | -11% | I-cache pressure |
 | 4 | 2-pair half2 LUT | 12.0 | -21% | Ternary overhead exceeds LUT savings |
 | 5 | Select chain (zero LUT) | 11.9 | -21% | Too much ALU |
-| 6 | Bit-arithmetic | 11.6 | -23% | Pure ALU, zero memory — but ALU cost too high |
+| 6 | Bit-arithmetic | 11.6 | -23% | Pure ALU, zero memory, but ALU cost too high |
 | 7 | Non-vec FA (nl=2) | 10.2 | -32% | Kernel not designed for single-token decode |
 | 8 | float cn[8] registers | — | — | Metal spills to stack (M5 only) |
 | 9 | half cn[8] registers | — | — | Also spills (M5 only) |
@@ -225,25 +225,24 @@ This includes NVFP4, KIVI, CacheQuant, and other KV cache quantization methods. 
 
 **Limitations:**
 - Tested on a single hardware platform (M5 Max). M1/M2 results pending (GPU contention during testing). The relative gains may be *larger* on lower-bandwidth hardware (M1/M2), where dequantization is more dominant relative to bus speed.
-- The threshold $\tau = 10^{-6}$ is fixed. A threshold ablation across $10^{-4}$ to $10^{-8}$ would establish whether a less conservative threshold (e.g., $10^{-5}$) provides additional speed at no quality cost. This is the most obvious follow-up experiment.
+- We perform a threshold ablation in Section 4.7 and find the method is insensitive to $\tau$ across $10^{-4}$ to $10^{-8}$. Perplexity is identical at all values.
 - Short context benefit is modest (+1.4%) because attention is less sparse.
 
 **Future work:**
-- **Threshold ablation:** Sweep $\tau$ from $10^{-4}$ to $10^{-8}$ and measure PPL + NIAH at each. If $10^{-5}$ maintains quality, it skips more positions and yields additional decode improvement for free.
 - **Combined 4-mag + sparse V on M2:** Expected to stack since they address independent bottlenecks (K and V dequant respectively).
 - **Context-adaptive dispatch:** Compile multiple FA kernel variants, select optimal path based on KV cache size at dispatch time.
 - **Sparse K dequant:** Extend the sparsity concept to K. After a first pass computing approximate attention scores, skip K dequant for positions that won't contribute. Requires two-pass attention or speculative attention.
 - **Non-Apple hardware:** Test on NVIDIA (CUDA) and AMD (ROCm) where the dequant bottleneck profile differs.
 
-More broadly, sparse V dequantization is the first instance of a wider class of **attention-aware kernel optimizations** — using the attention distribution computed during inference to gate downstream computation. The same principle could extend to hybrid precision attention (full-precision dequant for high-weight positions, approximate for low-weight), hardware-aware sparsity gating, or speculative K-path pruning.
+More broadly, sparse V dequantization is the first instance of a wider class of **attention-aware kernel optimizations**: using the attention distribution computed during inference to gate downstream computation. The same principle could extend to hybrid precision attention (full-precision dequant for high-weight positions, approximate for low-weight), hardware-aware sparsity gating, or speculative K-path pruning.
 
 ---
 
 ## 9. Conclusion
 
-We present a 3-line modification to flash attention kernels that yields up to 22.8% decode throughput improvement for quantized KV caches at long context, with zero quality degradation — and a surprising improvement in retrieval accuracy, suggesting that dequantizing negligible positions actively introduces noise into the attention output.
+We present a 3-line modification to flash attention kernels that yields up to 22.8% decode throughput improvement for quantized KV caches at long context, with zero quality degradation, and a surprising improvement in retrieval accuracy, suggesting that dequantizing negligible positions actively introduces noise into the attention output.
 
-The core insight is simple: making N dequant operations faster is bounded by hardware floors; eliminating $(1-p) \times N$ of them is not. After 14 failed attempts to optimize the dequant instruction itself, sparse V succeeds by changing the question from "how do we dequantize faster?" to "should we dequantize at all?"
+The core insight is simple: making N dequant operations faster is bounded by hardware floors; eliminating $(1-p) \times N$ of them entirely, rather than optimizing $N$ under hardware constraints, is not. After 14 failed attempts to optimize the dequant instruction itself, sparse V succeeds by changing the question from "how do we dequantize faster?" to "should we dequantize at all?"
 
 The technique exploits the natural sparsity of attention weights — a property that becomes more pronounced exactly when the dequant bottleneck is most severe. The approach is general to any quantized KV cache scheme, requires no model changes, no retraining, and no calibration data, and is orthogonal to existing dequant and compression optimizations. It is, we believe, the first instance of a broader class of attention-aware kernel optimizations that use the attention distribution to gate downstream computation.
 
@@ -263,9 +262,9 @@ To reproduce: build with `TURBO_SPARSE_V=1` environment variable and run `llama-
 
 ## Acknowledgments
 
-- **@spiritbuun** — CUDA fork with norm correction and register LUT, whose work inspired the hardware profiling investigation
-- **@Ambisphaeric, @mariotomich** — Independent M1 Max testers who confirmed the decode regression is hardware-dependent
-- **@ekryski** — GPT-OSS 20B testing on M1 Max with turbo4
+- **@spiritbuun**: CUDA fork with norm correction and register LUT, whose work inspired the hardware profiling investigation
+- **@Ambisphaeric, @mariotomich**: Independent M1 Max testers who confirmed the decode regression is hardware-dependent
+- **@ekryski**: GPT-OSS 20B testing on M1 Max with turbo4
 - The TurboQuant community for extensive cross-hardware validation
 
 ## References
