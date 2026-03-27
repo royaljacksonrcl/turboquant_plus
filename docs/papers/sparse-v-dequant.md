@@ -196,6 +196,8 @@ Before discovering sparse V, we exhaustively tested 14 dequant-level optimizatio
 
 **Conclusion:** On Apple Silicon, 4 divergent constant memory reads are faster than any arithmetic computation that produces the same 4-way selection. The constant cache, even when divergent, beats 7+ ALU operations. The only path beyond the 4-mag LUT is changing *what* data is read (sparse V, format changes), not *how* it's computed.
 
+Full experiment logs, kernel variants, and per-hardware profiling are available in [Decode Speed Hardware Analysis](https://github.com/TheTom/turboquant_plus/blob/main/docs/decode-speed-hardware-analysis.md).
+
 ---
 
 ## 6. Why Sparse V Works Where Dequant Tricks Don't
