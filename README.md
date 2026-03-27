@@ -50,15 +50,19 @@ Compresses transformer KV cache **4.6x** using PolarQuant + Walsh-Hadamard rotat
 
 **Prefill: flat 99% of q8_0 speed regardless of context length.**
 
-### Decode Speed (Server, Real-World)
+### Decode Speed (M5 Max 128GB, Sparse V Dequant)
 
 | Context | turbo3 decode | q8_0 decode | turbo3/q8_0 |
 |---------|-------------|-----------|-------------|
-| Short (~12 tok) | 78.4 | 85.2 | 0.92x |
-| 8K | 68.3 | 77.7 | 0.88x |
-| 48K (70-page PDF) | 39.9 | 55.6 | 0.72x |
+| Short (~12 tok) | 77.6 | 86.3 | 0.90x |
+| 4K | 74.9 | — | — |
+| 8K | 71.7 | — | — |
+| 16K | 66.5 | 72.0 | 0.92x |
+| 32K | 57.7 | 62.0 | **0.93x** |
 
-Decode is 88-92% of q8_0 at typical context on M5 Max. At very long context (48K+) it's 72% due to per-position dequant cost. On M2/M1 (pre-M5), the auto-detected 4-mag LUT gives +38-45% decode improvement at long context. See [Decode Speed Hardware Analysis](docs/decode-speed-hardware-analysis.md) for the full 14-approach experiment log, and [Context Scaling Deep Dive](docs/context-scaling-deep-dive.md) for the M5 Max optimization journey.
+**Sparse V dequant** skips V dequantization for positions where softmax attention weight < 1e-6. At long context, 90%+ of attention weights are negligible — this saves ~half the total dequant cost. **+22.8% decode at 32K** vs previous turbo3, pushing the ratio from 0.76x to 0.93x. Zero quality loss (PPL 6.176 vs 6.211 without sparse V). Benefit scales with context length — the longer the context, the bigger the win.
+
+On M2/M1 (pre-M5), the auto-detected 4-mag LUT gives an additional +38-45% decode improvement at long context, and is additive with sparse V. See [Decode Speed Hardware Analysis](docs/decode-speed-hardware-analysis.md) for the full 14-approach experiment log, and [Context Scaling Deep Dive](docs/context-scaling-deep-dive.md) for the M5 Max optimization journey.
 
 ### Speed Optimization Journey
 
@@ -87,6 +91,8 @@ Decode is 88-92% of q8_0 at typical context on M5 Max. At very long context (48K
 
 Tested using [Kamradt](https://github.com/gkamradt/LLMTest_NeedleInAHaystack) and [NVIDIA RULER](https://github.com/NVIDIA/RULER) methodology. Qwen3.5-35B-A3B on M5 Max 128GB.
 
+**Aggregate: turbo3 87.5% vs q8_0 93.8%.** No cliff at long context. N=10 needles remarkably stable (9-10/10 at every depth).
+
 **Single Needle — Depth (0-100%) x Context Length:**
 
 | Depth | 4K | 8K | 16K | 32K |
@@ -96,6 +102,8 @@ Tested using [Kamradt](https://github.com/gkamradt/LLMTest_NeedleInAHaystack) an
 
 **q8_0: 85% (17/20). turbo3: 80% (16/20).** No systematic degradation from compression.
 
+**V2 Kamradt Heatmap:** turbo3 80% vs q8_0 85% — delta is noise.
+
 **Multi-Key with 3 Distractors (RULER MK-NIAH):**
 
 | Cache Type | 4K | 8K | 16K | 32K |
@@ -103,7 +111,7 @@ Tested using [Kamradt](https://github.com/gkamradt/LLMTest_NeedleInAHaystack) an
 | q8_0 | 1/1 | 1/1 | 1/1 | 1/1 |
 | turbo3 | 1/1 | 1/1 | 1/1 | 1/1 |
 
-**100% retrieval accuracy with distractors through 32K.** turbo3 correctly ignores distractor needles at all context depths.
+**100% retrieval accuracy with distractors through 32K.** turbo3 correctly ignores distractor needles at all context depths. Way better than MLX quantized inference (17-45% at 128K per @jtdavies).
 
 ### Key Validation
 
