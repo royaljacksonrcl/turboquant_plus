@@ -3,6 +3,12 @@
 TurboQuant quick bench across multiple model families, architectures, and sizes.
 Hardware: Apple M5 Max 128GB. All tests with sparse V enabled.
 
+## Why Cross-Model Testing Matters
+
+This testing methodology caught a critical ISWA bug that single-model testing on Qwen would never have found. Gemma 2 (which uses interleaved sliding window attention) had PPL 13.7 trillion — complete garbage output at normal inference speed. The bug was a missing WHT rotation in one of five `build_attn` overloads in `llama-graph.cpp`. Without testing diverse model architectures, this would have shipped broken to every ISWA model user (Gemma 2, Cohere2, OLMo2, Gemma3N).
+
+**Lesson:** Always test across model families, not just the model you developed on.
+
 ## Test Matrix
 
 | # | Model | Type | Family | Size | Head dim | Quant |
