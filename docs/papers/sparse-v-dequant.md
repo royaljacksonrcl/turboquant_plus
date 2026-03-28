@@ -342,6 +342,54 @@ This suggests sparse V is safe to enable by default even for dense models. On de
 
 Raw logs: [`threshold-ablation-logs/dense_27b_sparse_v_clean_m5.txt`](../threshold-ablation-logs/dense_27b_sparse_v_clean_m5.txt).
 
+### 7.4 Cross-Format Validation on q4\_0
+
+To further validate format independence, we ran the full evaluation suite on q4\_0 (4-bit scalar quantization, 4× compression) — a widely-used KV cache format with a fundamentally different quantization mechanism from TurboQuant.
+
+**PPL (wikitext-103, 32K, 50 chunks):**
+
+| Config | PPL | ± CI |
+|--------|-----|------|
+| q4\_0 + sparse V | 7.0857 | 0.021 |
+| q4\_0 no sparse V | 7.0857 | 0.021 |
+| Delta | **0.0000** | |
+
+**NIAH (single needle, 9 positions):**
+
+| Config | Score |
+|--------|-------|
+| q4\_0 + sparse V | 8/9 |
+| q4\_0 no sparse V | 8/9 |
+
+Same miss at 16K 50% depth in both conditions.
+
+**Decode speed:**
+
+| Test | Sparse V ON | Sparse V OFF | Delta |
+|------|------------|-------------|-------|
+| Short (tg128) | 83.4 tok/s | 83.9 tok/s | -0.7% (noise) |
+| pp32768+tg128 | 1193.6 tok/s | 1180.9 tok/s | +1.1% (noise) |
+
+No measurable impact across any metric. q4\_0's dequant is lightweight (simple scale+offset), so sparse V has minimal computational leverage, but introduces no degradation.
+
+Note: q4\_0 is evaluated as an untuned baseline KV format. Optimization efforts in this work focused on q8\_0 and TurboQuant (turbo3), particularly in the context of sparse V integration.
+
+Raw logs: [`threshold-ablation-logs/q4_0_full_validation.txt`](../threshold-ablation-logs/q4_0_full_validation.txt).
+
+### 7.5 Cross-Format Summary
+
+Sparse V was evaluated across three KV cache formats with different quantization mechanisms, bit rates, and dequantization costs:
+
+| Format | Bits | PPL Δ (ON/OFF) | NIAH Δ | Decode Δ |
+|--------|------|---------------|--------|----------|
+| q8\_0 (scale+zero) | 8.0 | 0.0000 | identical | +5.0% (short) |
+| q4\_0 (scale+zero) | 4.0 | 0.0000 | identical | within noise |
+| turbo3 (WHT+polar) | 3.5 | 0.0000 | improved (7/9→9/9) | +22.8% (32K) |
+
+No measurable impact on perplexity or retrieval accuracy was observed in any format. Decode speed improvements scale with dequantization cost: turbo3 (expensive dequant) benefits most, q4\_0 (cheap dequant) benefits least.
+
+This suggests that attention-weight magnitude is a reliable proxy for computational relevance, independent of KV representation. Sparse V exhibits consistent ON/OFF equivalence across all formats, indicating that its behavior is governed by attention sparsity rather than quantization characteristics.
+
 ---
 
 ## 8. Limitations and Future Work
@@ -365,7 +413,7 @@ We present a 3-line modification to flash attention kernels that yields up to 22
 
 The core insight is straightforward: Making N dequant operations faster is bounded by hardware limits; eliminating $(1-p) \times N$ of them entirely is not. After 14 failed attempts to optimize the dequant instruction itself, sparse V succeeds by changing the question from "how do we dequantize faster?" to "should we dequantize at all?"
 
-The technique exploits the natural sparsity of attention weights — a property that becomes more pronounced exactly when the dequant bottleneck is most severe. The approach is general to any quantized KV cache scheme, requires no model changes, no retraining, and no calibration data, and is orthogonal to existing dequant and compression optimizations. This represents an instance of a broader class of attention-aware kernel optimizations, where computation is gated by the model's own sparsity patterns rather than optimized at the instruction level.
+The technique exploits the natural sparsity of attention weights — a property that becomes more pronounced exactly when the dequant bottleneck is most severe. Cross-format validation on q8\_0, q4\_0, and turbo3 shows no measurable negative impact on perplexity or retrieval accuracy across any tested format. Decode throughput effects vary by format and scale with dequantization cost, indicating that the optimization is a property of the attention mechanism itself rather than any specific quantization scheme. The approach requires no model changes, no retraining, and no calibration data, and is orthogonal to existing dequant and compression optimizations. This represents an instance of a broader class of attention-aware kernel optimizations, where computation is gated by the model's own sparsity patterns rather than optimized at the instruction level.
 
 More broadly, these results indicate that a significant fraction of value-side attention computation in long-context inference falls below numerical significance, and that the attention distribution itself provides a reliable, zero-cost signal for identifying these positions.
 
