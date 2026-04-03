@@ -296,4 +296,4 @@ Verdict (works / partial / broken):
 
 ---
 
-*This is a living document. Results will be updated as new community data comes in. Last updated: 2026-04-03. Data from [PR #45](https://github.com/TheTom/llama-cpp-turboquant/pull/45) community testing.*
+*This is a living document. Results will be updated as new community data comes in. Last updated: 2026-04-03. Data sourced from [PR #45](https://github.com/TheTom/llama-cpp-turboquant/pull/45) comments, [X/Twitter community testing](https://x.com/no_stp_on_snek), and direct contributor reports.*
