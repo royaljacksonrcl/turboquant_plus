@@ -594,6 +594,49 @@ TurboQuant KV cache compression is being ported to Apple's [MLX framework](https
 | Qwen2.5-7B 8bit | 64.2 | 64.1 | 0.00% |
 | phi-4 8bit | 32.9 | 32.7 | 0.00% |
 
+**M2 Pro — Qwen2.5-1.5B 8bit (dense, 28/28 KV layers, asymmetric):**
+
+| Test | Result |
+|------|--------|
+| KLD | 0.004 |
+| Top-1 match | 96.8% |
+| NIAH | 30/30 PASS |
+
+| Context | Baseline Decode | Turbo Asymmetric | vs Baseline |
+|---------|----------------|-----------------|-------------|
+| 128 | 34.8 | 35.2 | 101% |
+| 4096 | 46.9 | 21.6 | 46% |
+
+M2 Pro shows more decode regression at long context — lower memory bandwidth amplifies turbo overhead.
+
+**M5 Max Context Scaling (Qwen2.5-7B 8bit, asymmetric):**
+
+| Context | Baseline | Turbo Asymmetric | vs Baseline |
+|---------|----------|-----------------|-------------|
+| 1K | 51 | 46 | 90% |
+| 4K | 83 | 51 | 61% |
+| 8K | 51 | 35 | 69% |
+| 16K | 21 | 15 | 71% |
+| 32K | 6 | 5 | 83% |
+
+**MLX Python vs llama.cpp (Qwen2.5-7B, M5 Max):**
+
+| Framework | Prefill (400 tok) | Decode | Memory |
+|-----------|------------------|--------|--------|
+| llama.cpp (Q8_0) | 387 | 20.9 | 7.5 GB |
+| MLX (8bit) | 243 | **21.2** | 8.5 GB |
+
+MLX decode matches llama.cpp. Prefill 37% slower (lazy graph vs pre-compiled).
+
+**MLX Python vs llama.cpp (M2 Pro, Qwen2.5-7B):**
+
+| Framework | Prefill (400 tok) | Decode |
+|-----------|------------------|--------|
+| llama.cpp | 387 | 20.9 |
+| MLX | 243 | 21.3 |
+
+> **Note:** Future benchmark logs should record Apple Silicon power mode (Low / Auto / High) when known, as it can materially affect throughput.
+
 ### What's implemented
 - TurboQuant encode/decode using `mx.hadamard_transform` (MLX built-in)
 - Fused Metal kernels for encode, decode, and compressed-domain attention
