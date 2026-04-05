@@ -542,13 +542,44 @@ Detailed debugging logs, gotchas, and benchmarks from the llama.cpp port:
 - [Pre-Rotate-Queries Investigation](docs/pre-rotate-queries-investigation.md) — why graph-side WHT failed initially, how we fixed it
 - [Quality + Speed Gate](scripts/turbo-quality-gate.sh) — pre-push script checking PPL AND context scaling ratio (required before merge)
 
+## MLX Framework Port (Experimental)
+
+TurboQuant KV cache compression is being ported to Apple's [MLX framework](https://github.com/ml-explore/mlx) for native Python/Swift inference on Apple Silicon.
+
+**Fork:** [TheTom/mlx](https://github.com/TheTom/mlx) — branch `feature/turboquant-kv-clean`
+
+### Preliminary Results (Qwen3.5-2B 8bit, M5 Max)
+
+| Config | Decode | vs Baseline | PPL Delta | KV Savings |
+|--------|--------|-------------|-----------|------------|
+| Baseline (f16 KV) | 204 tok/s | — | — | — |
+| turbo4 asymmetric (K=FP16, V=4bit) | 177 tok/s | 87% | +0.18% | 73% |
+| turbo3 | 170 tok/s | 83% | -0.10% | 80% |
+
+### What's implemented
+- TurboQuant encode/decode using `mx.hadamard_transform` (MLX built-in)
+- Fused Metal kernels for encode, decode, and compressed-domain attention
+- TurboKVCache class compatible with mlx-lm inference
+- All findings from llama.cpp TurboQuant+ papers applied and validated
+- Beta distribution centroids, boundary layers, asymmetric K/V, dual SRHT signs, NR0=2 multi-row amortization
+
+### Status
+- **Experimental** — not yet production-ready
+- Decode speed gap (13%) is from Python dispatch overhead; closing it requires C++ primitives
+- Dense model testing in progress
+- Not yet submitted upstream
+
+See [MLX Swift port](https://github.com/ekryski/mlx-swift-lm/pull/7) for the Swift/iOS implementation (separate effort with Eric Kryski).
+
+---
+
 ## Contributing
 
 Issues and PRs welcome. The main areas where help is needed:
 
 1. **Upstream PR** — prepare llama.cpp contribution (CONTRIBUTING.md requirements)
 2. **CUDA kernel optimization** — fused FA kernels, decode speed parity
-3. **MLX port** — Apple MLX framework support
+3. **MLX C++ primitives** — convert Python turbo ops to native C++ for full decode speed parity
 4. **Quality metrics** — multi-run statistics, additional task benchmarks (GSM8K, code gen, reasoning)
 5. **Long context validation** — 64K+ testing across architectures
 
