@@ -552,7 +552,7 @@ TurboQuant KV cache compression is being ported to Apple's [MLX framework](https
 
 **Speed + Quality:**
 
-| Config | Prefill | Decode | vs Baseline | PPL | PPL Delta | KV Savings |
+| Config | Prefill | Decode | vs Baseline | PPL | PPL Delta | V Savings |
 |--------|---------|--------|-------------|-----|-----------|------------|
 | Baseline (f16 KV) | 584 | **204** | 100% | 3.0732 | — | — |
 | turbo4 all fused | 1,153 (+97%) | 168 | 83% | 3.0890 | +0.51% | 73% |
@@ -644,7 +644,7 @@ import mlx_lm
 from mlx.nn.layers.turbo_kv_cache import make_turbo_cache
 
 model, tokenizer = mlx_lm.load("mlx-community/Qwen2.5-7B-Instruct-8bit")
-cache = make_turbo_cache(model, bits=4)  # V=turbo4, boundary 2+2
+cache = make_turbo_cache(model, bits=4)  # K+V turbo4, boundary 2+2
 text = mlx_lm.generate(model, tokenizer, prompt="Hello!",
                         max_tokens=200, prompt_cache=cache, verbose=True)
 ```
@@ -691,16 +691,16 @@ pip install mlx-lm
 | 64K | 95.1 | 95.5 | **100.5%** | 74.2% |
 | 128K | 74.5 | 74.9 | **100.6%** | 74.2% |
 
-Output is word-for-word identical to baseline at all context lengths. V savings are from TurboQuant 4-bit compression (SRHT + Lloyd-Max). FP16 V retained for attention speed; compressed V stored for memory recovery at long context.
+Output is word-for-word identical to baseline at all context lengths. KV savings are from TurboQuant 4-bit compression (SRHT + Lloyd-Max). FP16 KV retained for attention speed; compressed KV stored for memory recovery at long context.
 
-**V Cache Memory at Scale**
+**KV Cache Memory at Scale**
 
-| Model | Context | FP16 V | Turbo4 V | Savings |
-|-------|---------|--------|----------|---------|
-| Qwen2.5-7B | 262K | 7.5 GB | 2.0 GB | 5.5 GB |
-| Llama-70B | 131K | 21.5 GB | 5.6 GB | 15.9 GB |
-| Llama-70B | 262K | 42.9 GB | 11.2 GB | 31.7 GB |
-| Command-R+ 104B | 131K | 17.2 GB | 4.5 GB | 12.7 GB |
+| Model | Context | FP16 KV | Turbo4 KV | Savings |
+|-------|---------|---------|-----------|---------|
+| Qwen2.5-7B | 262K | 15.0 GB | 3.9 GB | 11.1 GB |
+| Llama-70B | 131K | 42.9 GB | 11.2 GB | 31.7 GB |
+| Llama-70B | 262K | 85.9 GB | 22.3 GB | 63.6 GB |
+| Command-R+ 104B | 131K | 34.4 GB | 8.9 GB | 25.5 GB |
 
 ---
 
@@ -710,7 +710,7 @@ Issues and PRs welcome. The main areas where help is needed:
 
 1. **Upstream PR** — prepare llama.cpp contribution (CONTRIBUTING.md requirements)
 2. **CUDA kernel optimization** — fused FA kernels, decode speed parity
-3. **MLX C++ primitives** — convert Python turbo ops to native C++ for full decode speed parity
+3. **MLX memory recovery** — implement FP16 KV drop + compressed-only attention for memory-constrained long context
 4. **Quality metrics** — multi-run statistics, additional task benchmarks (GSM8K, code gen, reasoning)
 5. **Long context validation** — 64K+ testing across architectures
 
