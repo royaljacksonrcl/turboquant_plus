@@ -316,6 +316,77 @@ The initial V3 implementation was 186 seconds wall time for the 32K three-chunk 
 
 After all four passes, V3 wall time is 172 seconds versus baseline 171 seconds. The eviction scoring itself, threaded and SIMD-friendly, now costs approximately 378 milliseconds per chunk.
 
+### 4.8 Boundary Layer Skip (Negative Result)
+
+After the initial validation matrix was complete, Michael Sharpe at Project 89 published "Coherence-Guided Dead-Head Identification" (2026), which derives a zero-parameter dead-head threshold from coupled-oscillator criticality and explicitly protects the first one or two attention layers as input transducers that behave differently from coupled oscillators. The same boundary-protection pattern had independently shown up on the weight-quantization side of the TurboQuant+ stack, where boundary layers require higher bit budgets than interior layers to avoid compound damage. The natural question was whether V3's per-cell scoring loop should also exclude the first few attention layers, on the hypothesis that they contribute noise rather than useful coupling signal for eviction decisions.
+
+This section documents the experiment and its negative outcome.
+
+#### 4.8.1 The change
+
+An additional CLI flag was added to V3:
+
+```
+--triatt-boundary-skip N   (default 0 = off, experimental)
+```
+
+When N is greater than zero, the per-cell scoring loop filters out all blocks whose absolute attention layer index is less than N. The score normalizer is adjusted to use the post-filter block count so that absolute score magnitudes stay comparable across different N values. For standard transformers where every layer is attention, `N=1` skips the first attention layer, `N=2` skips the first two, and so on. For hybrid Mamba+Attention architectures where the first attention layer may not be at index zero (Qwen3.5-27B has its first attention layer at `il=3`), small values of N are no-ops and the user must set N to match the architecture's attention layer stride to see any effect.
+
+#### 4.8.2 Qwen2.5-7B at 32K
+
+| Config | PPL | Delta vs baseline 6.8504 |
+|--------|-----|--------------------------|
+| V3 skip=0 (control) | 6.8508 | +0.006% |
+| V3 skip=1 | 6.9150 | +0.94% |
+| V3 skip=2 | 6.9166 | +0.97% |
+
+Skipping even one boundary layer on the pure transformer introduces an immediate roughly 1 percent PPL regression relative to the V3 baseline. Skipping two is not meaningfully worse than skipping one, which means the damage is concentrated in the removal of layer 0 specifically, not in how many layers are excluded beyond that.
+
+#### 4.8.3 Qwen2.5-7B at 64K
+
+| Config | PPL | Delta vs baseline 6.2531 |
+|--------|-----|--------------------------|
+| V3 skip=0 (control) | 6.2530 | -0.002% |
+| V3 skip=2 | 6.2940 | +0.65% |
+
+The regression is slightly smaller at 64K than at 32K but the direction is the same. There is no evidence that boundary protection becomes more valuable at longer context lengths on a pure transformer.
+
+#### 4.8.4 Qwen3.5-27B at 32K
+
+This is the model where V3 currently fails NIAH at middle and end positions under `skip=0`, and therefore the configuration where boundary protection had the clearest theoretical motivation: fewer attention layers, sparser coupling density, boundary layer potentially dominating an underpowered lattice.
+
+| Config | PPL | Delta vs baseline 7.4640 | Delta vs skip=0 |
+|--------|-----|--------------------------|-----------------|
+| V3 skip=0 (control) | 7.4853 | +0.29% | baseline |
+| V3 skip=4 | 7.4779 | +0.19% | -0.10% |
+| V3 skip=8 | 7.4817 | +0.24% | -0.05% |
+
+PPL improves modestly with `skip=4`, which is the first value that actually catches an attention layer on Qwen3.5-27B since attention layers start at `il=3`. `skip=8` also improves over `skip=0` but is worse than `skip=4`, suggesting that skipping only the first attention layer is the sweet spot and excluding a second one starts removing useful signal. The direction of the PPL effect is the opposite of the pure-transformer result, which is qualitatively consistent with Sharpe's framework.
+
+NIAH tells a different story:
+
+| Config | start (400) | middle (65000) | end (120000) |
+|--------|-------------|----------------|--------------|
+| V3 skip=0 (prior) | PASS | FAIL ("Operation MI") | FAIL ("Operation Manchu") |
+| V3 skip=4 | PASS | FAIL ("Ise-class confusion") | FAIL ("scanning for code word") |
+| V3 skip=8 | PASS | FAIL ("scanning for word") | FAIL ("scanning for code word") |
+
+The middle and end positions fail under `skip=4`, `skip=8`, and `skip=0` identically. The specific strings the model chases vary run to run but the class of failure is the same: the model cannot find the needle, scans plausible-sounding sections, and gives up. The small PPL improvement does not translate into any NIAH recovery.
+
+#### 4.8.5 Interpretation
+
+The experiment is a clean negative. Three takeaways:
+
+1. **PPL and NIAH are decoupled on this failure mode.** V3 on Qwen3.5-27B improves PPL marginally with boundary skip, but NIAH stays broken at exactly the same positions with the same failure signature. This reinforces a pattern that has been consistent throughout this project: perplexity cannot feel end-of-context retrieval damage, and tuning for PPL does not indirectly fix NIAH. A positive PPL delta is not a reliable signal that a change helps retrieval.
+
+2. **Boundary protection is the right pattern for the weight-quant path, not for the eviction-scoring path.** On the weight-quant side of TurboQuant+, boundary layers must be protected because they genuinely cannot be compressed without cascading damage. That empirical fact does not imply that the same layers contribute noise to an eviction decision. V3's scoring is averaging phase-alignment signal across attention layers, not compressing them, and on a pure transformer every attention layer carries real signal for that average, including layer 0. Two different operations on the same layer set have different sensitivities.
+
+3. **Sharpe's framework gives a reason why Qwen3.5 hybrid models are hard, but not a direct fix for V3.** The coupled-oscillator interpretation correctly predicts that sparser attention coupling density makes the eviction decision worse. It does not tell us which specific replacement for V3's trig scoring would fix the NIAH failure. The likely candidate, based on the framework, is a direct coupling measurement (mean cosine alignment between a head's write-back and the receiver residual, as Sharpe defines it) used as the eviction criterion itself, rather than as a filter on top of the existing scoring. That is a larger change and is left as follow-on work.
+
+#### 4.8.6 Current defaults
+
+Given the negative result, the `--triatt-boundary-skip` default was changed from 2 back to 0. The flag remains available as an opt-in knob for anyone who wants to replicate the experiment or try it as part of a larger change (for example, in combination with a coupling-based replacement for the trig scoring). Nobody using V3 with the default configuration sees any boundary skipping and no behavior change from the earlier committed version.
+
 ---
 
 ## 5. Production Reality
@@ -422,13 +493,15 @@ The following questions are open and matter for production adoption. If you have
 
 ### 7.1 Why does V3 break on hybrid Mamba+Attention models?
 
-Perplexity transfers cleanly to Qwen3.5-27B and Qwen3.5-35B-A3B (+0.29 percent and +0.21 percent respectively), but needle retrieval silently fails at middle and end positions in both. The failure is position-dependent, not random. Three hypotheses, none verified:
+Perplexity transfers cleanly to Qwen3.5-27B and Qwen3.5-35B-A3B (+0.29 percent and +0.21 percent respectively), but needle retrieval silently fails at middle and end positions in both. The failure is position-dependent, not random. Three hypotheses remain viable after the boundary skip experiment (Section 4.8) ruled out "layer 0 is acting as a pure transducer":
 
-1. **Small attention layer count.** These hybrids have only 16 of 64 (or 10 of 40) attention layers. V3 averages scores across attention layers, so fewer layers means a weaker signal. Is there a layer-count threshold below which this approach degrades?
+1. **Partial RoPE ignored dimensions.** Qwen3.5 rotates only 64 of 256 head dimensions. The V3 scoring formula operates entirely on the rotated portion of K. The other 192 dimensions carry real semantic content that V3 does not look at. On a pure transformer with full RoPE this does not matter because V3 sees the whole K vector. On Qwen3.5 it means V3 is blind to 75 percent of each cell's K content. Augmenting the score with a direct dot product over the unrotated dimensions is an obvious candidate fix, untested so far.
 
-2. **Partial RoPE.** Qwen3.5 rotates only 64 of 256 head dimensions. The scoring formula operates on the rotated portion of K. The unrotated dimensions carry real semantic content that V3 ignores. Would augmenting the score with a direct dot product over the unrotated dimensions recover retrieval?
+2. **Scoring formula is phase-only.** V3 measures phase alignment between K and the learned Q center, which is a "where in frequency space does this cell point" measurement. Sharpe's coupled-oscillator framework suggests the right observable for eviction decisions may be the direct coupling measurement (mean cosine alignment between a head's write-back and the receiver residual), not phase alignment. Replacing the trig scoring with a coupling measurement is a larger change than a filter and is not in the current V3 implementation.
 
-3. **M-RoPE sections.** The rotation layout is `[11, 11, 10, 0]` with different position indices per section. For text-only inference the sections collapse to the same position, so mathematically this should reduce to standard RoPE, but the theta scaling may differ from what V3 assumes.
+3. **M-RoPE sections and theta scaling.** The rotation layout is `[11, 11, 10, 0]` with different position indices per section. For text-only inference the sections collapse to the same position, so mathematically this should reduce to standard RoPE, but the theta scaling may differ from what V3 assumes.
+
+The boundary skip experiment in Section 4.8 explicitly tested the "small attention layer count / layer 0 is a transducer" hypothesis and ruled it out. Boundary skipping does not rescue NIAH middle/end on qwen35 even when it is tuned to catch the first attention layer at `il=3`. The failure mode is the same with boundary skip set to 0, 4, or 8.
 
 If you have tested TriAttention on hybrid architectures and have a recipe that works, the community needs it.
 
@@ -477,8 +550,11 @@ All perplexity numbers on wikitext-2-raw, three chunks, batch size 512, with the
 | 32K | V2 85% | 27853 | 7.4244 | +8.38% | 27 | 385s |
 | 32K | V3 85% prefix=256 | 27853 | 6.8833 | +0.48% | 27 | 190s |
 | 32K | TurboQuant+ plus V3 90% | 29491 | 6.9080 | +0.84% | 18 | 204s |
+| 32K | V3 90% prefix=128 boundary_skip=1 | 29491 | 6.9150 | +0.94% | 18 | — |
+| 32K | V3 90% prefix=128 boundary_skip=2 | 29491 | 6.9166 | +0.97% | 18 | — |
 | 64K | Baseline | 0 | 6.2531 | 0 | 0 | 493s |
 | 64K | V3 90% prefix=128 | 58982 | 6.2530 | -0.002% | 36 | 497s |
+| 64K | V3 90% prefix=128 boundary_skip=2 | 58982 | 6.2940 | +0.65% | 36 | 487s |
 
 ### A.2 Qwen3.5-27B-Q8_0
 
@@ -486,6 +562,8 @@ All perplexity numbers on wikitext-2-raw, three chunks, batch size 512, with the
 |---------|--------|--------|-----|-------|-----------------|
 | 32K | Baseline | 0 | 7.4640 | 0 | 0 |
 | 32K | V3 90% prefix=128 | 29491 | 7.4853 | +0.29% | 18 |
+| 32K | V3 90% prefix=128 boundary_skip=4 | 29491 | 7.4779 | +0.19% | 18 |
+| 32K | V3 90% prefix=128 boundary_skip=8 | 29491 | 7.4817 | +0.24% | 18 |
 
 ### A.3 Qwen3.5-35B-A3B-Q8_0
 
