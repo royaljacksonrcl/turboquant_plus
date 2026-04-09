@@ -66,11 +66,137 @@ The default values used in the validation below are `prefix_protect = 128`, `win
 
 ---
 
-## 3. Results
+## 3. Methodology
 
-All perplexity numbers are measured on wikitext-2-raw using three prefill chunks and batch size 512, which forces multi-batch evaluation so eviction actually fires during the perplexity sweep. All needle-in-a-haystack results use a strict checker that runs with `--no-display-prompt` so the echoed prompt (which contains the needle) cannot falsely pass the grep. The needle is a random string (`PURPLE ELEPHANT 7742`) that the model cannot plausibly hallucinate from distributed knowledge.
+Every number in the results section was produced by one of two test tracks: a perplexity sweep on wikitext-2-raw, or a strict needle-in-a-haystack check against a wikitext-derived prompt with a random needle inserted at a known position. Both tracks evolved during the project in response to bugs that were quietly inflating or deflating the numbers. This section documents the protocol as it stands now, along with the traps that justify each choice.
 
-### 3.1 Qwen2.5-7B at 32K: V1 versus V2 versus V3
+### 3.1 Hardware and Build
+
+All measurements in this paper are on an Apple M5 Max, 128 GB unified memory, Metal backend. The llama.cpp fork is `TheTom/llama-cpp-turboquant` at the `experiment/triattention-integration` branch. Build configuration is the standard cmake flow with Metal enabled:
+
+```bash
+cmake -B build-test -DLLAMA_METAL=ON
+cmake --build build-test -j 8 --target llama-perplexity llama-completion
+```
+
+Transfer validation to other hardware backends (CUDA, HIP) has not been done for V3 specifically and is an open task.
+
+### 3.2 Perplexity Protocol
+
+All perplexity numbers are measured on wikitext-2-raw using `llama-perplexity` with the following fixed configuration:
+
+- `-f wikitext-2-raw/wiki.test.raw` (standard wikitext test split)
+- `-b 512` (batch size, critical, explained below)
+- `--chunks 3` (minimum, critical, explained below)
+- `-c` set to the target context size (32768 or 65536)
+
+The reported "PPL" in every table is the `Final estimate` line from the `llama-perplexity` output, not the first or intermediate estimate. Standard error is reported as the `+/-` value on the same line.
+
+**Why three chunks minimum.** The very first TriAttention result in this project was a single-chunk run at 32K that showed a 3.9 percent PPL improvement over baseline. That result did not replicate on three chunks. The real three-chunk number on the same configuration is a 1.2 percent regression. Single-chunk perplexity is too noisy at long context to distinguish signal from variance, and an apparent improvement at one chunk can flip sign on three. Every perplexity number in this paper is a three-chunk measurement at minimum.
+
+**Why batch size 512 matters.** When the batch size equals the context size (the default for `llama-perplexity` at 32K), each prefill chunk is processed as a single batch, which means the TriAttention eviction hook only runs once per chunk, after the full prefill is already in cache. In that configuration, eviction fires zero times during the PPL sweep and the "improvement" you see is an artifact of eviction not actually happening. Forcing `-b 512` makes the prefill process one 512-token ubatch at a time, so the eviction hook is called many times during the sweep and actually removes tokens. Without this flag the PPL numbers are meaningless for TriAttention evaluation.
+
+**Eviction confirmation.** Every PPL run in this paper is eviction-confirmed: I grep the stderr for the `evict: evicted` log line emitted by the TriAttention code and record the count in the "Eviction rounds" column of the results tables. A run where this count is zero is either a broken configuration or a baseline run. If V3 was enabled but the round count is zero, the run is discarded.
+
+### 3.3 NIAH (Needle-in-a-Haystack) Protocol
+
+NIAH tests whether a specific fact survives the eviction policy at a specific position in the context. The protocol is:
+
+**Prompt construction.** The haystack is built from `wikitext-2-raw/wiki.test.raw` at the target context size (character length is approximately 4 times the token count). The needle is a fixed random string:
+
+```
+The secret code word is PURPLE ELEPHANT 7742.
+```
+
+It is inserted at a specified character position within the haystack. The question is fixed:
+
+```
+What is the secret code word mentioned earlier? Answer with just the code word and number, nothing else:
+```
+
+A short Python snippet builds the final prompt by slicing the wiki text around the insertion point and concatenating the before-slice, the needle, the after-slice, and the question. The full script lives at `niah_7b_strict.sh` on the branch.
+
+**Positions.** Three positions are tested for each configuration, scaled to the context size:
+
+| Context | Start | Middle | End |
+|---------|-------|--------|-----|
+| 32K | 400 chars | 65000 chars | 120000 chars |
+| 64K | 800 chars | 130000 chars | 240000 chars |
+
+The positions target the early, middle, and late regions of the context so the test can distinguish "V3 is globally fine" from "V3 has a position-dependent failure mode" (which it does on hybrid models).
+
+**Running llama-completion.** The actual invocation is:
+
+```bash
+./build-test/bin/llama-completion \
+    -m <model> \
+    -f <prompt file> \
+    -n <generation budget> \
+    -c <context size> \
+    --temp 0 \
+    -no-cnv \
+    --no-display-prompt \
+    [--triatt-budget N --triatt-hybrid 2 --triatt-prefix 128]
+```
+
+The important flags:
+
+- `-no-cnv` disables conversation mode. Without it, `llama-completion` reads stdin for an interactive user turn and exits immediately with `> EOF by user` when stdin is empty, so every NIAH run looks like a FAIL. This bit us during the original overnight batch.
+- `--no-display-prompt` is load-bearing. By default `llama-completion` echoes the prompt to stdout before emitting generated tokens. The prompt contains the needle. Without this flag, grepping the output for the needle string passes every single run, including ones where the model never actually produced an answer. Every early NIAH result in this project was a silent false PASS until this was fixed.
+- `--temp 0` removes sampling variance.
+- `-n` is the generation budget. Choice depends on the model, explained below.
+
+**Generation budget.** For standard non-reasoning models like Qwen2.5-7B, `-n 32` or `-n 64` is sufficient to produce "PURPLE ELEPHANT 7742" as the first output. For reasoning models that emit a `<think>` block before their final answer (Qwen3.5-27B, Qwen3.5-35B-A3B), `-n 32` is catastrophic: the model burns the entire generation budget on the reasoning trace and never gets to the answer, so the check sees the `<think>` preamble instead of the needle and scores FAIL for every run, including baselines. Reasoning model runs in this paper use `-n 1024`, which lets the think block complete and the final answer emerge.
+
+**Strict checker.** The output is filtered to strip `llama.cpp` perf print lines and GGML housekeeping, then passed through a case-sensitive grep for the exact string `PURPLE ELEPHANT 7742`. Anything less precise opens false passes:
+
+- Match `PURPLE ELEPHANT` only: false PASS on any hallucinated elephant
+- Match `7742` only: false PASS on any random number
+
+Because the needle is a randomly chosen capitalized phrase plus a four-digit number, a true positive requires the model to have the exact string in its KV cache. The rate of hallucinating this string without retrieval is effectively zero.
+
+The checker also classifies near-misses for diagnostic value:
+
+| Result | Meaning |
+|--------|---------|
+| PASS | Exact string present in generated output |
+| PARTIAL_WORD | `PURPLE ELEPHANT` present but the number is wrong or truncated (for example, `774` instead of `7742`) |
+| PARTIAL_NUMBER | `7742` present but without `PURPLE ELEPHANT` |
+| FAIL | Neither the phrase nor the number present |
+
+All numbers in the results section use this classification. PARTIAL results are reported as PARTIAL, not rolled into PASS.
+
+**Known harness edge case.** At 64K the Qwen2.5-7B model occasionally produces the needle in title case (`Purple Elephant 7742`) instead of upper case. The strict checker is case-sensitive and scores this as PARTIAL_WORD even though reading the generated tokens directly shows successful retrieval. This is a cosmetic harness bug, not a model failure, and is called out explicitly in the results table for 7B @ 64K.
+
+### 3.4 Wall Time Protocol
+
+All wall time numbers in Section 3.7 and Appendix A are measured from outside the process, using `date +%s` before the `llama-perplexity` invocation and again after. This captures model load, prefill, eviction, and the sampler teardown as a single wall-clock cost, which is what a user actually sees.
+
+Because model load is a fixed overhead regardless of configuration, wall time comparisons across configurations on the same model are valid even though the absolute numbers include load. Wall time comparisons across different models are not valid from this paper because load cost differs.
+
+For a given configuration, the reported wall time is the median of at least two runs after any cold-cache run has been discarded. Two or three runs is sufficient at this level of noise (~1 percent run-to-run variance) but is a coarser measurement than the PPL track.
+
+### 3.5 Reproducing the Tables
+
+Every table in Section 4 (Results) can be reproduced by running one of the scripts committed to the branch:
+
+| Script | What it produces |
+|--------|------------------|
+| `niah_7b_strict.sh` | 7B NIAH results at 32K (V1 ablation and V3 comparison) |
+| `v3_validation.sh` | 7B V3 at 32K (PPL plus NIAH) |
+| `v3_ablations.sh` | V3 ablations (85 percent retention, prefix size) |
+| `v3_stack_and_transfer.sh` | TurboQuant+ plus V3 stack and 27B/35B transfer |
+| `v3_transfer_rerun.sh` | Final transfer validation with the reasoning-model fix (-n 1024) |
+
+Each script produces a `<name>_results.txt` output that matches the tables in Section 4 line-for-line. The scripts are deliberately kept simple (bash plus the existing `llama-perplexity` and `llama-completion` binaries) so anyone pulling the branch can rerun them without setting up a Python environment.
+
+---
+
+## 4. Results
+
+All numbers in this section were produced by the protocol in Section 3.
+
+### 4.1 Qwen2.5-7B at 32K: V1 versus V2 versus V3
 
 Model: Qwen2.5-7B-Instruct-Q8_0. Context: 32768. Budget: 29491 (90 percent retention). Chunks: 3.
 
@@ -92,7 +218,7 @@ At 85 percent retention (budget 27853), the same comparison:
 
 V3 at 85 percent is still below V1 at 90 percent on the quality axis.
 
-### 3.2 Qwen2.5-7B at 32K: Needle-in-a-Haystack
+### 4.2 Qwen2.5-7B at 32K: Needle-in-a-Haystack
 
 NIAH test. The needle is inserted at character positions 400, 65000, and 120000 in a wikitext-derived prompt that fills 32K tokens. The strict checker passes only if the exact string `PURPLE ELEPHANT 7742` appears in the generated tokens.
 
@@ -108,7 +234,7 @@ NIAH test. The needle is inserted at character positions 400, 65000, and 120000 
 
 V1 silently fails at the end position. V2 silently fails at the start position. V3 passes at all three positions for 90 percent retention. At 85 percent, V3 still passes start and end but degrades at middle to a partial match (the model produces "774" instead of "7742"), which is the first real quality cliff we observed.
 
-### 3.3 Prefix Size Ablation
+### 4.3 Prefix Size Ablation
 
 V3 at 90 percent retention, varying the prefix window size:
 
@@ -119,7 +245,7 @@ V3 at 90 percent retention, varying the prefix window size:
 
 Prefix 128 and prefix 256 produce identical PPL and identical NIAH outcomes, so 128 is the tighter default.
 
-### 3.4 Qwen2.5-7B at 64K
+### 4.4 Qwen2.5-7B at 64K
 
 Model: Qwen2.5-7B-Instruct-Q8_0. Context: 65536. Budget: 58982 (90 percent). Chunks: 3.
 
@@ -139,7 +265,7 @@ Needle retrieval at 64K on 7B:
 
 The asterisk at start indicates that the model produced `Purple Elephant 7742` in title case rather than the exact uppercase the checker expects. Reading the generated tokens directly confirms successful retrieval; the checker has a case-sensitivity edge case, not a retrieval failure. Middle and end positions produce exact uppercase matches.
 
-### 3.5 Transfer to Qwen3.5 Hybrid Architectures
+### 4.5 Transfer to Qwen3.5 Hybrid Architectures
 
 The Qwen3.5 architecture family (`qwen35` and `qwen35moe`) combines Mamba2 state-space layers with full attention layers at a `full_attention_interval` of 4. On Qwen3.5-27B only 16 of 64 layers are attention layers; on Qwen3.5-35B-A3B only 10 of 40 are. The models also use partial RoPE (64 of 256 head dimensions are rotated) and an interleaved M-RoPE layout with dimension sections `[11, 11, 10, 0]`.
 
@@ -163,7 +289,7 @@ Under V3, both hybrid models retrieve the start needle but fail at middle and en
 
 Note that the Qwen3.5 NIAH runs used `-n 1024` rather than `-n 64` because these are reasoning models. They emit a `<think>` block before producing the final answer, and with a 32-token generation budget the reasoning trace does not finish. At `-n 1024` the reasoning completes and the model emits its final answer, which is what the strict checker evaluates.
 
-### 3.6 Full Stack: TurboQuant+ plus V3
+### 4.6 Full Stack: TurboQuant+ plus V3
 
 Model: Qwen2.5-7B-Instruct-Q8_0. Context: 32768. Chunks: 3.
 
@@ -176,7 +302,7 @@ Model: Qwen2.5-7B-Instruct-Q8_0. Context: 32768. Chunks: 3.
 
 The stack is approximately additive on quality: TurboQuant+ contributes +0.55 percent, V3 contributes +0.31 percent, and the stack lands at +0.84 percent. The marginal cost of adding V3 on top of TurboQuant+ is 0.29 percent perplexity. The wall-time cost of V3 on top of TurboQuant+ is 4 seconds out of 200, which is below the noise floor of a single run.
 
-### 3.7 Speed: The Real Story
+### 4.7 Speed: The Real Story
 
 The initial V3 implementation was 186 seconds wall time for the 32K three-chunk run, an 89 percent overhead versus baseline. The final optimized version is 172 seconds wall time, a 1 percent overhead. Four optimization passes got there, in order of contribution:
 
@@ -192,7 +318,7 @@ After all four passes, V3 wall time is 172 seconds versus baseline 171 seconds. 
 
 ---
 
-## 4. Production Reality
+## 5. Production Reality
 
 The validated workload envelope for V3 is narrower than the paper's headline claim and narrower than I hoped when I started.
 
@@ -208,9 +334,9 @@ V3 makes the minimum viable shipping case for TriAttention clean on the narrow v
 
 ---
 
-## 5. How to Run
+## 6. How to Run
 
-### 5.1 Pull the Branch
+### 6.1 Pull the Branch
 
 The code lives on the `experiment/triattention-integration` branch of the llama.cpp fork at `TheTom/llama-cpp-turboquant`. This branch is not merged to the fork's main TurboQuant+ branch and is not intended to be merged until the open questions in Section 6 are resolved. It is published for community review and for anyone who wants to reproduce the results or run their own workloads against it.
 
@@ -230,14 +356,14 @@ git checkout experiment/triattention-integration
 
 The commit-level rollback ladder for this branch is documented in Appendix B. Each commit is a clean checkpoint that can be checked out independently to reproduce the speed or quality numbers at that point in the progression.
 
-### 5.2 Build
+### 6.2 Build
 
 ```bash
 cmake -B build-test -DLLAMA_METAL=ON
 cmake --build build-test -j 8 --target llama-perplexity llama-completion
 ```
 
-### 5.3 Default (V1, paper-faithful)
+### 6.3 Default (V1, paper-faithful)
 
 Omitting the hybrid flag runs the paper-faithful version, which is the default for anyone who pulls the branch without knowing the V3 work exists.
 
@@ -251,7 +377,7 @@ Omitting the hybrid flag runs the paper-faithful version, which is the default f
 
 This produces the +1.20 percent PPL / NIAH end fail result.
 
-### 5.4 V3 Hybrid (recommended for validated workloads)
+### 6.4 V3 Hybrid (recommended for validated workloads)
 
 ```bash
 ./build-test/bin/llama-perplexity \
@@ -265,7 +391,7 @@ This produces the +1.20 percent PPL / NIAH end fail result.
 
 The `--triatt-hybrid 2` flag selects V3. The `--triatt-prefix 128` flag sets the prefix window size. Both flags are opt-in; the default remains V1. This produces the effectively baseline PPL / NIAH all-pass result on Qwen2.5-7B.
 
-### 5.5 Full Stack (TurboQuant+ plus V3)
+### 6.5 Full Stack (TurboQuant+ plus V3)
 
 ```bash
 ./build-test/bin/llama-perplexity \
@@ -280,21 +406,21 @@ The `--triatt-hybrid 2` flag selects V3. The `--triatt-prefix 128` flag sets the
 
 This is the full compression stack: TurboQuant+ quantizes the KV bytes, V3 evicts the 10 percent lowest-scoring tokens. The combined cost is +0.84 percent PPL at 2.9 times KV memory reduction, 1.19 times baseline wall time.
 
-### 5.6 NIAH Test
+### 6.6 NIAH Test
 
-The NIAH script used in this paper lives at `niah_7b_strict.sh` in the same branch. It generates a wikitext-derived prompt with the needle inserted at a fixed character position, runs `llama-completion` with `--no-display-prompt` so the echoed prompt cannot false-pass the grep, and checks for the exact string `PURPLE ELEPHANT 7742` in the generated output. For reasoning models, pass `-n 1024` so the `<think>` block can complete before the final answer.
+See Section 3.3 for the full NIAH protocol. The runnable script is `niah_7b_strict.sh` on the branch, which invokes `llama-completion` with the correct flags and parses the output with the strict checker described in Section 3.3. For reasoning models, pass `-n 1024` so the `<think>` block completes before the final answer is emitted.
 
-### 5.7 Environment Variable Fallback
+### 6.7 Environment Variable Fallback
 
 Both `--triatt-hybrid` and `--triatt-prefix` have environment variable fallbacks: `TRIATT_HYBRID` and `TRIATT_PREFIX`. The CLI flag takes precedence when both are set. Adaptive calibration (continuing to update the query centers after warmup, rather than freezing them) can be enabled via `TRIATT_ADAPTIVE=1`, but this disables the scheduler callback uninstall optimization and will cost approximately 6 seconds per run in current validated measurements.
 
 ---
 
-## 6. Missing Pieces (Community Request)
+## 7. Missing Pieces (Community Request)
 
 The following questions are open and matter for production adoption. If you have data or insight, please drop it in the PR discussion.
 
-### 6.1 Why does V3 break on hybrid Mamba+Attention models?
+### 7.1 Why does V3 break on hybrid Mamba+Attention models?
 
 Perplexity transfers cleanly to Qwen3.5-27B and Qwen3.5-35B-A3B (+0.29 percent and +0.21 percent respectively), but needle retrieval silently fails at middle and end positions in both. The failure is position-dependent, not random. Three hypotheses, none verified:
 
@@ -306,25 +432,25 @@ Perplexity transfers cleanly to Qwen3.5-27B and Qwen3.5-35B-A3B (+0.29 percent a
 
 If you have tested TriAttention on hybrid architectures and have a recipe that works, the community needs it.
 
-### 6.2 Does V3 hold on reasoning workloads?
+### 7.2 Does V3 hold on reasoning workloads?
 
 The TriAttention paper's strongest claim is on reasoning models where thinking traces contain heavy redundancy. None of the results in this paper test that directly. The closest we have is the Qwen3.5 hybrids, which emit `<think>` blocks but are not pure reasoning models in the DeepSeek R1 sense. Testing V3 on R1-distill or QwQ at 32K and beyond would directly address the paper's target workload.
 
-### 6.3 What happens at 128K and beyond?
+### 7.3 What happens at 128K and beyond?
 
 V3 at 64K on 7B is perplexity-bit-identical to baseline with NIAH clean. Scaling to 128K has two open questions: first, whether the per-segment quota K=8 is still appropriate (the buckets get coarser as context grows), and second, whether the calibration window of 1024 tokens is still sufficient when the cache holds 100K plus tokens of drift. An early calibration freeze, which is what the current V3 does after the scheduler callback uninstall, may need to be replaced with a periodic re-calibration above a certain context threshold.
 
-### 6.4 Multi-needle and coherence
+### 7.4 Multi-needle and coherence
 
 Single-needle NIAH is the weakest real retrieval benchmark. A production workload with multiple facts scattered across a long document, or an agent with tool results from many earlier turns, stresses a different failure mode than "find this one fact." V3 has not been measured on any multi-needle or multi-turn retrieval benchmark. If you have a harness for this, the V3 numbers against it would be directly useful.
 
-### 6.5 The paper's 10x claim
+### 7.5 The paper's 10x claim
 
 The paper reports up to 10 times compression on reasoning workloads. All of the V3 results in this paper are at 10 percent savings (90 percent retention). We have not yet found a safe operating point anywhere close to 90 percent savings on general text with V3 or with V1. Either our test workload is harder than the paper's, our scoring implementation diverges from the paper's on a detail we have not found, or the paper's aggressive compression ratio only applies to workloads we have not tested. If anyone has reproduced the paper's 10x claim on a non-reasoning workload, that would be extremely useful to compare against.
 
 ---
 
-## 7. References
+## 8. References
 
 - Weian Mao, Xi Lin, Wei Huang, Yuxin Xie, Tianfu Fu, Bohan Zhuang, Song Han, Yukang Chen. **TriAttention: Efficient Long Reasoning with Trigonometric KV Compression.** arXiv:2604.04921, 2026. Apache 2.0 License. <https://github.com/WeianMao/triattention>
 - Google Research. **TurboQuant: Hadamard Rotation for KV Cache Compression.** ICLR 2026.
